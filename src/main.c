@@ -24,12 +24,16 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
+
 #include <glib.h>
 #include <stdlib.h>
 #include <gtk/gtk.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
 #include <X11/keysym.h>
 #ifdef HAVE_APPINDICATOR
-#include <libappindicator/app-indicator.h>
+#include <libayatana-appindicator/app-indicator.h>
 #endif
 #include "main.h"
 #include "utils.h"
@@ -42,6 +46,9 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <string.h>
+
+#define ICON "clipit-trayicon"
+#define ICON_OFFLINE "clipit-trayicon-offline"
 
 static gchar* primary_text;
 static gchar* clipboard_text;
@@ -59,21 +66,45 @@ static gboolean status_menu_lock = FALSE;
 
 static gboolean actions_lock = FALSE;
 
-/* Init preferences structure */
-prefs_t prefs = {DEF_USE_COPY,         DEF_USE_PRIMARY,      DEF_SYNCHRONIZE,
-                 DEF_AUTOMATIC_PASTE,  DEF_SHOW_INDEXES,     DEF_SAVE_URIS,
-                 DEF_USE_RMB_MENU,     DEF_SAVE_HISTORY,     DEF_HISTORY_LIMIT,
-                 DEF_ITEMS_MENU,       DEF_STATICS_SHOW,     DEF_STATICS_ITEMS,
-                 DEF_HYPERLINKS_ONLY,  DEF_CONFIRM_CLEAR,    DEF_SINGLE_LINE,
-                 DEF_REVERSE_HISTORY,  DEF_ITEM_LENGTH,      DEF_ELLIPSIZE,
-                 INIT_HISTORY_KEY,     INIT_ACTIONS_KEY,     INIT_MENU_KEY,
-                 INIT_SEARCH_KEY,      INIT_OFFLINE_KEY,     DEF_NO_ICON,
-                 DEF_OFFLINE_MODE};
+static Atom a_Primary = None;
+static Atom a_Clipboard = None;
+static Atom a_netWmName = None;
+static Display *display = NULL;
 
-/* Variables for prefix buffer used for matching input to menu items */
-#define MAX_PREFIX_BUF_SIZE 100
-gchar prefix_buffer[MAX_PREFIX_BUF_SIZE];
-int prefix_index;
+/* Init preferences structure */
+prefs_t prefs = {DEF_USE_COPY,
+                 DEF_USE_PRIMARY,
+                 DEF_SYNCHRONIZE,
+                 DEF_AUTOMATIC_PASTE,
+                 DEF_SHOW_INDEXES,
+                 DEF_SAVE_URIS,
+                 DEF_USE_RMB_MENU,
+                 DEF_SAVE_HISTORY,
+                 DEF_HISTORY_LIMIT,
+                 DEF_HISTORY_TIMEOUT,
+                 DEF_HISTORY_TIMEOUT_SECONDS,
+                 DEF_ITEMS_MENU,
+                 DEF_STATICS_SHOW,
+                 DEF_STATICS_ITEMS,
+                 DEF_HYPERLINKS_ONLY,
+                 DEF_CONFIRM_CLEAR,
+                 DEF_SINGLE_LINE,
+                 DEF_REVERSE_HISTORY,
+                 DEF_ITEM_LENGTH,
+                 DEF_ELLIPSIZE,
+                 INIT_HISTORY_KEY,
+                 INIT_ACTIONS_KEY,
+                 INIT_MENU_KEY,
+                 INIT_SEARCH_KEY,
+                 INIT_OFFLINE_KEY,
+                 DEF_NO_ICON,
+                 DEF_OFFLINE_MODE,
+                 DEF_EXCLUDE_WINDOWS};
+
+/* Variables for input buffer used for matching input to menu items */
+#define MAX_INPUT_BUF_SIZE 100
+gchar input_buffer[MAX_INPUT_BUF_SIZE];
+int input_index;
 
 
 /* If the user pressed a number key go directly to that item in the menu */
@@ -83,7 +114,54 @@ gboolean selected_by_digit(const GtkWidget *history_menu, const GdkEventKey *eve
  * As the user types, attempt to match input with the values in the menu.
  * Only the first match will be activated.
  * */
-gboolean selected_by_prefix(const GtkWidget *history_menu, const GdkEventKey *event) ;
+gboolean selected_by_input(const GtkWidget *history_menu, const GdkEventKey *event);
+
+/* Determine, if selection comes from excluded window. */
+static gboolean is_selection_from_excluded_window(Atom selection_type) {
+  gboolean excluded = FALSE;
+  Window window;
+  XTextProperty text_prop_return;
+  gchar* window_name = NULL;
+  int tmp;
+
+  window = XGetSelectionOwner(display, selection_type);
+
+  if (window != None)
+  {
+    // Using _NET_WM_NAME property instead of WM_NAME/XFetchName, because it is guaranted to be UTF-8 encoded.
+    if (XGetTextProperty(display, window, &text_prop_return, a_netWmName))
+    {
+      window_name = (gchar*) text_prop_return.value;
+    }
+  }
+
+  // XGetSelectionOwner doesn't work well for Qt apps. It returns unnamed window outside real app window hierarchy.
+  // Try focused window instead.
+  if (!window_name)
+  {
+    XGetInputFocus(display, &window, &tmp);
+
+    if (XGetTextProperty(display, window, &text_prop_return, a_netWmName))
+    {
+      window_name = (gchar*) text_prop_return.value;
+    }
+  }
+
+  if (window_name)
+  {
+    GRegex *regexp = NULL;
+    if (prefs.exclude_windows && strlen(prefs.exclude_windows) > 0)
+    {
+      regexp = g_regex_new(prefs.exclude_windows, G_REGEX_CASELESS, 0, NULL);
+      if (regexp) {
+        excluded = g_regex_match(regexp, window_name, 0, NULL);
+        g_regex_unref(regexp);
+      }
+    }
+  }
+
+  return excluded;
+}
 
 /* Called every CHECK_INTERVAL seconds to check for new items */
 static gboolean item_check(gpointer data) {
@@ -125,9 +203,20 @@ static gboolean item_check(gpointer data) {
   else
   {
     GdkModifierType button_state;
-    gdk_window_get_pointer(NULL, NULL, NULL, &button_state);
+    GdkScreen *screen = gdk_screen_get_default();
+    if (screen)
+    {
+      GdkDisplay *display = gdk_screen_get_display(screen);
+      GdkWindow *window = gdk_screen_get_root_window(screen);
+      GdkSeat *seat = gdk_display_get_default_seat(display);
+
+      gdk_window_get_device_position(window, gdk_seat_get_pointer(seat), NULL,
+          NULL, &button_state);
+    }
+
     /* Proceed if mouse button not being held */
-    if ((primary_temp != NULL) && !(button_state & GDK_BUTTON1_MASK))
+    if ((primary_temp != NULL) && !(button_state & GDK_BUTTON1_MASK) &&
+      !is_selection_from_excluded_window(a_Primary))
     {
       /* Check if primary is the same as the last entry */
       if (g_strcmp0(primary_temp, primary_text) != 0)
@@ -162,7 +251,8 @@ static gboolean item_check(gpointer data) {
   else
   {
     /* Check if clipboard is the same as the last entry */
-    if (g_strcmp0(clipboard_temp, clipboard_text) != 0)
+    if (g_strcmp0(clipboard_temp, clipboard_text) != 0 &&
+      !is_selection_from_excluded_window(a_Clipboard))
     {
       /* New clipboard entry */
       g_free(clipboard_text);
@@ -295,7 +385,7 @@ static void show_about_dialog(GtkMenuItem *menu_item, gpointer user_data) {
     /* Create the about dialog */
     GtkWidget* about_dialog = gtk_about_dialog_new();
     gtk_window_set_icon((GtkWindow*)about_dialog,
-                        gtk_widget_render_icon(about_dialog, GTK_STOCK_ABOUT, GTK_ICON_SIZE_MENU, NULL));
+                        gtk_widget_render_icon_pixbuf(about_dialog, GTK_STOCK_ABOUT, GTK_ICON_SIZE_MENU));
 
     gtk_about_dialog_set_program_name((GtkAboutDialog*)about_dialog, "ClipIt");
     #ifdef HAVE_CONFIG_H
@@ -305,7 +395,7 @@ static void show_about_dialog(GtkMenuItem *menu_item, gpointer user_data) {
                                 _("Lightweight GTK+ clipboard manager."));
 
     gtk_about_dialog_set_website((GtkAboutDialog*)about_dialog,
-                                 "https://github.com/shantzu/ClipIt");
+                                 "https://github.com/CristianHenzel/ClipIt");
 
     gtk_about_dialog_set_copyright((GtkAboutDialog*)about_dialog, "Copyright (C) 2010-2012 Cristian Henzel");
     gtk_about_dialog_set_authors((GtkAboutDialog*)about_dialog, authors);
@@ -476,155 +566,164 @@ static gboolean show_actions_menu(gpointer data) {
   return FALSE;
 }
 
-/* Returns true if any menu label starts with prefix */
-static bool any_menu_label_starts_with_prefix(GtkMenuShell *menu, gchar *prefix, int max_items) {
-  GList *element;
-  GtkMenuItem *menu_item;
-  const gchar *menu_label;
-  int i;
-  for (i = 0, element = menu->children; element != NULL && i < max_items; element = element->next, i++) {
-    menu_item = (GtkMenuItem *) element->data;
-    menu_label = gtk_menu_item_get_label(menu_item);
-    if (strncmp(prefix, menu_label, strlen(prefix)) == 0) {
-      return TRUE;
-    }
-  }
-  return FALSE;
-}
-
-/* Append a character to the prefix buffer */
-static void append_to_prefix_buffer(gchar *character) {
-  if (prefix_index < MAX_PREFIX_BUF_SIZE) {
-    prefix_buffer[prefix_index++] = *character;
-    prefix_buffer[prefix_index] = '\0';
+/* Append a character to the input buffer */
+static void append_to_input_buffer(gchar *character) {
+  if (input_index < MAX_INPUT_BUF_SIZE) {
+    input_buffer[input_index++] = *character;
+    input_buffer[input_index] = '\0';
   }
 
 }
 
-/* Remove the last character from the prefix buffer */
-static void remove_from_prefix_buffer() {
-  if (prefix_index > 0) {
-    prefix_buffer[--prefix_index] = '\0';
+/* Remove the last character from the input buffer */
+static void remove_from_input_buffer() {
+  if (input_index > 0) {
+    input_buffer[--input_index] = '\0';
   }
 }
 
-/* Completley wipe the prefix buffer */
-static void clear_prefix_buffer() {
-  prefix_index = 0;
-  prefix_buffer[prefix_index] = '\0';
+/* Completely wipe the input buffer */
+static void clear_input_buffer() {
+  input_index = 0;
+  input_buffer[input_index] = '\0';
 }
 
 /* Handle user input while the menu is open */
 static gboolean menu_key_pressed(GtkWidget *history_menu, GdkEventKey *event, gpointer user_data) {
   gboolean handled = selected_by_digit(history_menu, event);
   if (!handled) {
-    handled = selected_by_prefix(history_menu, event);
+    handled = selected_by_input(history_menu, event);
   }
   return handled;
 }
 
+
+/* Draw an underline under the matched portion of text.
+ * match should be a pointer to the first character of the matched text.
+ */
+void underline_match(char* match, GtkMenuItem* menu_item, const gchar* menu_label) {
+  if (!match)
+    return;
+
+  int start = match - menu_label;
+  int end = start + strlen(input_buffer);
+
+  PangoAttribute* underline = pango_attr_underline_new (PANGO_UNDERLINE_SINGLE);
+  underline->start_index = start;
+  underline->end_index = end;
+
+  PangoAttrList* attr_list = pango_attr_list_new();
+  pango_attr_list_insert (attr_list, underline);
+
+  GtkWidget* gtk_label = gtk_bin_get_child (GTK_BIN (menu_item));
+  gtk_label_set_attributes (gtk_label, attr_list);
+}
+
 /*
- * As the user types, attempt to match input with the values in the menu.
- * Only the first match will be activated.
- * */
-gboolean selected_by_prefix(const GtkWidget *history_menu, const GdkEventKey *event) {
-  gboolean event_was_handled = FALSE;
+ * As the user types, attempt to match input with the values in the menu. The matched text will be
+ * underlined and non matching entries greyed out.
+*/
+gboolean selected_by_input(const GtkWidget *history_menu, const GdkEventKey *event) {
   if (event->keyval == GDK_KEY_Delete || event->keyval == GDK_KEY_BackSpace) {
-    remove_from_prefix_buffer();
-    event_was_handled = TRUE;
-
+    remove_from_input_buffer();
   } else if (event->keyval == GDK_KEY_KP_Enter || event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_Escape) {
-    clear_prefix_buffer();
-
-  } else if (isprint(*event->string)) {
-    append_to_prefix_buffer(event->string);
-
-    GtkMenuShell *menu = (GtkMenuShell *) history_menu;
-    GList *element;
-    GtkMenuItem *menu_item;
-    const gchar *menu_label;
-
-    if (any_menu_label_starts_with_prefix(menu, prefix_buffer, prefs.items_menu)) {
-      bool should_select = TRUE;
-      element = menu->children;
-      int count = 0;
-      while (element != NULL && count < prefs.items_menu) {
-        menu_item = (GtkMenuItem *) element->data;
-        menu_label = gtk_menu_item_get_label(menu_item);
-        gtk_menu_item_deselect(menu_item);
-        if (strncmp(prefix_buffer, menu_label, strlen(prefix_buffer)) == 0) {
-          if (should_select) {
-            gtk_menu_item_select(menu_item);
-            menu->active_menu_item = (GtkWidget *) menu_item;
-            should_select = FALSE;
-          }
-        }
-        element = element->next;
-        count++;
-      }
-      event_was_handled = TRUE;
-    }
+    clear_input_buffer();
+    return FALSE;
   }
-  return event_was_handled;
+
+  if (event->keyval == GDK_KEY_Down || event->keyval == GDK_KEY_Up) {
+    return FALSE;
+  }
+
+  if (isprint(*event->string))
+    append_to_input_buffer(event->string);
+
+  GtkMenuShell* menu = (GtkMenuShell *) history_menu;
+  GList* element = gtk_container_get_children(menu);
+  GtkMenuItem *menu_item, *first_match = 0;
+
+  const gchar* menu_label;
+  int count = 0, match_count = 0;
+  char* match;
+
+  while (element->next != NULL && count < prefs.items_menu) {
+    menu_item = (GtkMenuItem *) element->data;
+    menu_label = gtk_menu_item_get_label(menu_item);
+
+    gtk_menu_item_deselect(menu_item);
+
+    match = strcasestr(menu_label, input_buffer);
+    if (match) {
+      if (!first_match)
+        first_match = menu_item;
+      match_count++;
+      underline_match(match, menu_item, menu_label);
+      gtk_widget_set_sensitive(menu_item, true);
+    } else {
+      gtk_widget_set_sensitive(menu_item, false);
+    }
+    element = element->next;
+    count++;
+  }
+
+  if (first_match && match_count != prefs.items_menu) {
+    gtk_menu_item_select(first_match);
+	gtk_menu_shell_select_item(menu, first_match);
+    return TRUE;
+  }
+  return FALSE;
 }
 
 gboolean selected_by_digit(const GtkWidget *history_menu, const GdkEventKey *event) {
+  int selection = -1;
   switch (event->keyval) {
     case XK_1:
     case XK_KP_1:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(0));
-      gtk_widget_destroy(history_menu);
+	  selection = 1;
       break;
     case XK_2:
     case XK_KP_2:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(1));
-      gtk_widget_destroy(history_menu);
+	  selection = 2;
       break;
     case XK_3:
     case XK_KP_3:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(2));
-      gtk_widget_destroy(history_menu);
+	  selection = 3;
       break;
     case XK_4:
     case XK_KP_4:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(3));
-      gtk_widget_destroy(history_menu);
+	  selection = 4;
       break;
     case XK_5:
     case XK_KP_5:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(4));
-      gtk_widget_destroy(history_menu);
+	  selection = 5;
       break;
     case XK_6:
     case XK_KP_6:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(5));
-      gtk_widget_destroy(history_menu);
+	  selection = 6;
       break;
     case XK_7:
     case XK_KP_7:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(6));
-      gtk_widget_destroy(history_menu);
+	  selection = 7;
       break;
     case XK_8:
     case XK_KP_8:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(7));
-      gtk_widget_destroy(history_menu);
+	  selection = 8;
       break;
     case XK_9:
     case XK_KP_9:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(8));
-      gtk_widget_destroy(history_menu);
+	  selection = 9;
       break;
     case XK_0:
     case XK_KP_0:
-      item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(9));
-      gtk_widget_destroy(history_menu);
+	  selection = 0;
       break;
-
-    default:
-      return FALSE;
   }
-  return TRUE;
+  if (selection >= 0) {
+	item_selected((GtkMenuItem*)history_menu, GINT_TO_POINTER(selection));
+	gtk_widget_destroy(history_menu);
+	return TRUE;
+  }
+  return FALSE;
 }
 
 static void toggle_offline_mode() {
@@ -634,14 +733,28 @@ static void toggle_offline_mode() {
 	}
 
 	prefs.offline_mode = !prefs.offline_mode;
+
+#ifdef HAVE_APPINDICATOR
+  app_indicator_set_icon(indicator, prefs.offline_mode ? ICON_OFFLINE : ICON);
+#else
+  gtk_status_icon_set_from_icon_name(status_icon, prefs.offline_mode ? ICON_OFFLINE : ICON);
+#endif
+
 	/* Save the change */
 	save_preferences();
+}
+
+/* When the menu is closed, clear the input buffer */
+gboolean menu_destroyed(const GtkWidget *history_menu, const GdkEventKey *event) {
+  clear_input_buffer();
+  return FALSE;
 }
 
 static GtkWidget *create_history_menu(GtkWidget *history_menu) {
 	GtkWidget *menu_item, *item_label;
 	history_menu = gtk_menu_new();
 	g_signal_connect((GObject*)history_menu, "key-press-event", (GCallback)menu_key_pressed, NULL);
+	g_signal_connect((GObject*)history_menu, "destroy", (GCallback)menu_destroyed, NULL);
 
 	/* Items */
 	if ((history != NULL) && (history->data != NULL))
@@ -704,7 +817,7 @@ static GtkWidget *create_history_menu(GtkWidget *history_menu) {
 				element_number--;
 			else
 				element_number++;
-				element_number_small++;
+			element_number_small++;
 		}
 		/* Cleanup */
 		g_free(primary_temp);
@@ -843,9 +956,9 @@ void create_app_indicator(gint create) {
 	indicator_menu = create_tray_menu(indicator_menu, 2);
 	/* check if we need to create the indicator or just refresh the menu */
 	if(create == 1) {
-		indicator = app_indicator_new("clipit", "clipit-trayicon", APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+		indicator = app_indicator_new("clipit", ICON, APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
 		app_indicator_set_status (indicator, APP_INDICATOR_STATUS_ACTIVE);
-		app_indicator_set_attention_icon (indicator, "clipit-trayicon");
+		app_indicator_set_attention_icon (indicator, ICON);
 	}
 	app_indicator_set_menu (indicator, GTK_MENU (indicator_menu));
 }
@@ -931,7 +1044,13 @@ static void clipit_init() {
 	/* Create clipboard */
 	primary = gtk_clipboard_get(GDK_SELECTION_PRIMARY);
 	clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
-	g_timeout_add(CHECK_INTERVAL, item_check, NULL);
+	g_signal_connect(primary, "owner-change", G_CALLBACK(item_check), NULL);
+	g_signal_connect(clipboard, "owner-change", G_CALLBACK(item_check), NULL);
+
+	display = XOpenDisplay(NULL);
+	a_Primary = XInternAtom(display, "PRIMARY", True);
+	a_Clipboard = XInternAtom(display, "CLIPBOARD", True);
+	a_netWmName = XInternAtom(display, "_NET_WM_NAME", True);
 
 	/* Read preferences */
 	read_preferences();
@@ -954,7 +1073,7 @@ static void clipit_init() {
 #ifdef HAVE_APPINDICATOR
 	create_app_indicator(1);
 #else
-	status_icon = gtk_status_icon_new_from_icon_name("clipit-trayicon");
+	status_icon = gtk_status_icon_new_from_icon_name(ICON);
 	gtk_status_icon_set_tooltip_text((GtkStatusIcon*)status_icon, _("Clipboard Manager"));
 	g_signal_connect((GObject*)status_icon, "button_press_event", (GCallback)status_icon_clicked, NULL);
 #endif
@@ -967,8 +1086,8 @@ int main(int argc, char **argv) {
 	bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
 	textdomain(GETTEXT_PACKAGE);
 
-    prefix_buffer[0] = '\0';
-    prefix_index = 0;
+	input_buffer[0] = '\0';
+	input_index = 0;
 
 	/* Initiate GTK+ */
 	gtk_init(&argc, &argv);
@@ -1017,6 +1136,9 @@ int main(int argc, char **argv) {
 	/* Init ClipIt */
 	clipit_init();
 
+	/* Create the history_timeout_timer if applicable */
+	init_history_timeout_timer();
+
 	/* Run GTK+ loop */
 	gtk_main();
 
@@ -1037,6 +1159,8 @@ int main(int argc, char **argv) {
 	g_free(primary_text);
 	g_free(clipboard_text);
 	g_free(synchronized_text);
+
+	XCloseDisplay(display);
 
 	/* Exit */
 	return 0;

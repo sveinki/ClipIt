@@ -38,6 +38,8 @@ GtkWidget *copy_check,
           *save_uris_check,
           *use_rmb_menu_check,
           *history_spin,
+          *history_timeout_check,
+          *history_timeout_spin,
           *items_menu,
           *statics_show_check,
           *statics_items_spin,
@@ -52,12 +54,16 @@ GtkWidget *copy_check,
           *confirm_check,
           *reverse_check,
           *linemode_check,
-          *hyperlinks_check;
+          *hyperlinks_check,
+          *exclude_windows_entry;
 
 GtkListStore* actions_list;
 GtkTreeSelection* actions_selection;
 GtkListStore* exclude_list;
 GtkTreeSelection* exclude_selection;
+
+/* Reference to the current history_timeout_timer */
+guint history_timeout_timer;
 
 /* Apply the new preferences */
 static void apply_preferences()
@@ -89,6 +95,8 @@ static void apply_preferences()
   prefs.use_rmb_menu = gtk_toggle_button_get_active((GtkToggleButton*)use_rmb_menu_check);
   prefs.save_history = gtk_toggle_button_get_active((GtkToggleButton*)save_check);
   prefs.history_limit = gtk_spin_button_get_value_as_int((GtkSpinButton*)history_spin);
+  prefs.history_timeout_seconds = gtk_spin_button_get_value_as_int((GtkSpinButton*)history_timeout_spin);
+  prefs.history_timeout = gtk_toggle_button_get_active((GtkToggleButton*)history_timeout_check);
   prefs.items_menu = gtk_spin_button_get_value_as_int((GtkSpinButton*)items_menu);
   prefs.statics_show = gtk_toggle_button_get_active((GtkToggleButton*)statics_show_check);
   prefs.statics_items = gtk_spin_button_get_value_as_int((GtkSpinButton*)statics_items_spin);
@@ -103,6 +111,7 @@ static void apply_preferences()
   prefs.menu_key = g_strdup(gtk_entry_get_text((GtkEntry*)menu_key_entry));
   prefs.search_key = g_strdup(gtk_entry_get_text((GtkEntry*)search_key_entry));
   prefs.offline_key = g_strdup(gtk_entry_get_text((GtkEntry*)offline_key_entry));
+  prefs.exclude_windows = g_strdup(gtk_entry_get_text((GtkEntry*)exclude_windows_entry));
 
   /* Bind keys and apply the new history limit */
   keybinder_bind(prefs.history_key, history_hotkey, NULL);
@@ -129,6 +138,8 @@ void save_preferences()
   g_key_file_set_boolean(rc_key, "rc", "use_rmb_menu", prefs.use_rmb_menu);
   g_key_file_set_boolean(rc_key, "rc", "save_history", prefs.save_history);
   g_key_file_set_integer(rc_key, "rc", "history_limit", prefs.history_limit);
+  g_key_file_set_integer(rc_key, "rc", "history_timeout_seconds", prefs.history_timeout_seconds);
+  g_key_file_set_boolean(rc_key, "rc", "history_timeout", prefs.history_timeout);
   g_key_file_set_integer(rc_key, "rc", "items_menu", prefs.items_menu);
   g_key_file_set_boolean(rc_key, "rc", "statics_show", prefs.statics_show);
   g_key_file_set_integer(rc_key, "rc", "statics_items", prefs.statics_items);
@@ -144,6 +155,7 @@ void save_preferences()
   g_key_file_set_string(rc_key, "rc", "search_key", prefs.search_key);
   g_key_file_set_string(rc_key, "rc", "offline_key", prefs.offline_key);
   g_key_file_set_boolean(rc_key, "rc", "offline_mode", prefs.offline_mode);
+  g_key_file_set_string(rc_key, "rc", "exclude_windows", prefs.exclude_windows);
 
   /* Check config and data directories */
   check_dirs();
@@ -239,6 +251,8 @@ void read_preferences()
     prefs.use_rmb_menu = g_key_file_get_boolean(rc_key, "rc", "use_rmb_menu", NULL);
     prefs.save_history = g_key_file_get_boolean(rc_key, "rc", "save_history", NULL);
     prefs.history_limit = g_key_file_get_integer(rc_key, "rc", "history_limit", NULL);
+    prefs.history_timeout = g_key_file_get_boolean(rc_key, "rc", "history_timeout", NULL);
+    prefs.history_timeout_seconds = g_key_file_get_integer(rc_key, "rc", "history_timeout_seconds", NULL);
     prefs.items_menu = g_key_file_get_integer(rc_key, "rc", "items_menu", NULL);
     prefs.statics_show = g_key_file_get_boolean(rc_key, "rc", "statics_show", NULL);
     prefs.statics_items = g_key_file_get_integer(rc_key, "rc", "statics_items", NULL);
@@ -254,10 +268,15 @@ void read_preferences()
     prefs.search_key = g_key_file_get_string(rc_key, "rc", "search_key", NULL);
     prefs.offline_key = g_key_file_get_string(rc_key, "rc", "offline_key", NULL);
     prefs.offline_mode = g_key_file_get_boolean(rc_key, "rc", "offline_mode", NULL);
+    prefs.exclude_windows = g_key_file_get_string(rc_key, "rc", "exclude_windows", NULL);
 
     /* Check for errors and set default values if any */
     if ((!prefs.history_limit) || (prefs.history_limit > 1000) || (prefs.history_limit < 0))
       prefs.history_limit = DEF_HISTORY_LIMIT;
+    if (!prefs.history_timeout)
+      prefs.history_timeout = DEF_HISTORY_TIMEOUT;
+    if (!prefs.history_timeout_seconds)
+      prefs.history_timeout_seconds = DEF_HISTORY_TIMEOUT_SECONDS;
     if ((!prefs.items_menu) || (prefs.items_menu > 1000) || (prefs.items_menu < 0))
       prefs.items_menu = DEF_ITEMS_MENU;
     if ((!prefs.item_length) || (prefs.item_length > 75) || (prefs.item_length < 0))
@@ -397,6 +416,69 @@ static void check_toggled(GtkToggleButton *togglebutton, gpointer user_data)
     gtk_widget_set_sensitive((GtkWidget*)statics_items_spin, TRUE);
   } else {
     gtk_widget_set_sensitive((GtkWidget*)statics_items_spin, FALSE);
+  }
+  /* If history_timeout is disabled, prevent interaction with the history_timeout_spinner */
+  if (gtk_toggle_button_get_active((GtkToggleButton*)history_timeout_check)) {
+    gtk_widget_set_sensitive((GtkWidget*)history_timeout_spin, TRUE);
+  } else {
+    gtk_widget_set_sensitive((GtkWidget*)history_timeout_spin, FALSE);
+  }
+}
+
+
+static void start_purge_timer(gint timeout_seconds);
+static void stop_purge_timer();
+
+/* Purge history if history_timeout is enabled. This function is called every prefs.history_timeout_seconds */
+static gboolean purge_history() {
+    if (prefs.history_timeout) {
+      g_list_free(history);
+      history = NULL;
+      save_history();
+      clear_main_data();
+      return TRUE;
+    }
+  stop_purge_timer();
+  return FALSE;
+}
+
+/* Start the history_purge_timer. If another timer exists, it will be replaced */
+void start_purge_timer(gint timeout_seconds) {
+  if (history_timeout_timer)
+    g_source_remove(history_timeout_timer);
+  history_timeout_timer = g_timeout_add_seconds(timeout_seconds, purge_history, NULL);
+}
+
+/* Stop the history_purge_timer. If no timer exists, nothing is done */
+static void stop_purge_timer() {
+  if (history_timeout_timer) {
+    g_source_remove(history_timeout_timer);
+    history_timeout_timer = 0;
+  }
+}
+
+/* When the history_timeout_spin's value changes, create a new history_timeout_timer with the updated value */
+static void handle_history_spinner(GtkSpinButton *spinbutton, gpointer user_data) {
+  gint spinner_value = gtk_spin_button_get_value_as_int((GtkSpinButton*)history_timeout_spin);
+  if (gtk_toggle_button_get_active((GtkToggleButton*)history_timeout_check))
+    start_purge_timer(spinner_value);
+}
+
+/* When the history_timeout_check button is toggled, either start or stop the history_timeout_timer */
+static void handle_history_purge_toggle(GtkWidget *togglebutton, gpointer user_data) {
+  if (gtk_toggle_button_get_active((GtkToggleButton*)history_timeout_check)) {
+    gint spinner_value = gtk_spin_button_get_value_as_int((GtkSpinButton*)history_timeout_spin);
+    save_preferences();
+    start_purge_timer(spinner_value);
+  } else {
+    stop_purge_timer();
+  }
+}
+
+/* Initialize the history_timeout_timer on startup */
+void init_history_timeout_timer() {
+  if (prefs.history_timeout) {
+    start_purge_timer(prefs.history_timeout_seconds);
   }
 }
 
@@ -650,7 +732,7 @@ void show_preferences(gint tab) {
                                                     GTK_STOCK_CANCEL,   GTK_RESPONSE_REJECT,
                                                     GTK_STOCK_OK,       GTK_RESPONSE_ACCEPT, NULL);
 
-  gtk_window_set_icon((GtkWindow*)dialog, gtk_widget_render_icon(dialog, GTK_STOCK_PREFERENCES, GTK_ICON_SIZE_MENU, NULL));
+  gtk_window_set_icon((GtkWindow*)dialog, gtk_widget_render_icon_pixbuf(dialog, GTK_STOCK_PREFERENCES, GTK_ICON_SIZE_MENU));
   gtk_window_set_resizable((GtkWindow*)dialog, FALSE);
 
   /* Create notebook */
@@ -665,7 +747,7 @@ void show_preferences(gint tab) {
   GtkWidget* page_settings = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)page_settings, 12, 6, 12, 6);
   gtk_notebook_append_page((GtkNotebook*)notebook, page_settings, gtk_label_new(_("Settings")));
-  GtkWidget* vbox_settings = gtk_vbox_new(FALSE, 12);
+  GtkWidget* vbox_settings = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
   gtk_container_add((GtkContainer*)page_settings, vbox_settings);
 
   /* Build the clipboards frame */
@@ -677,7 +759,7 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
   copy_check = gtk_check_button_new_with_mnemonic(_("Use _Copy (Ctrl-C)"));
   g_signal_connect((GObject*)copy_check, "toggled", (GCallback)check_toggled, NULL);
@@ -701,7 +783,7 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
   show_indexes_check = gtk_check_button_new_with_mnemonic(_("Show _indexes in history menu"));
   gtk_box_pack_start((GtkBox*)vbox, show_indexes_check, FALSE, FALSE, 0);
@@ -713,7 +795,7 @@ void show_preferences(gint tab) {
   gtk_box_pack_start((GtkBox*)vbox, confirm_check, FALSE, FALSE, 0);
   use_rmb_menu_check = gtk_check_button_new_with_mnemonic(_("_Use right-click menu"));
   gtk_box_pack_start((GtkBox*)vbox, use_rmb_menu_check, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   gtk_box_pack_start((GtkBox*)vbox_settings, frame, FALSE, FALSE, 0);
 
@@ -721,7 +803,7 @@ void show_preferences(gint tab) {
   GtkWidget* page_history = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)page_history, 12, 6, 12, 6);
   gtk_notebook_append_page((GtkNotebook*)notebook, page_history, gtk_label_new(_("History")));
-  GtkWidget* vbox_history = gtk_vbox_new(FALSE, 12);
+  GtkWidget* vbox_history = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
   gtk_container_add((GtkContainer*)page_history, vbox_history);
 
   /* Build the history frame */
@@ -733,12 +815,12 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
   save_check = gtk_check_button_new_with_mnemonic(_("Save _history"));
   gtk_widget_set_tooltip_text(save_check, _("Save and restore history between sessions"));
   gtk_box_pack_start((GtkBox*)vbox, save_check, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Items in history:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -747,7 +829,7 @@ void show_preferences(gint tab) {
   history_spin = gtk_spin_button_new((GtkAdjustment*)adjustment, 0.0, 0);
   gtk_spin_button_set_update_policy((GtkSpinButton*)history_spin, GTK_UPDATE_IF_VALID);
   gtk_box_pack_start((GtkBox*)hbox, history_spin, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Items in menu:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -759,7 +841,7 @@ void show_preferences(gint tab) {
   statics_show_check = gtk_check_button_new_with_mnemonic(_("Show _static items in menu"));
   g_signal_connect((GObject*)statics_show_check, "toggled", (GCallback)check_toggled, NULL);
   gtk_box_pack_start((GtkBox*)vbox, statics_show_check, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Static items in menu:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -769,6 +851,22 @@ void show_preferences(gint tab) {
   gtk_spin_button_set_update_policy((GtkSpinButton*)statics_items_spin, GTK_UPDATE_IF_VALID);
   gtk_box_pack_start((GtkBox*)hbox, statics_items_spin, FALSE, FALSE, 0);
   gtk_box_pack_start((GtkBox*)vbox_history, frame, FALSE, FALSE, 0);
+  history_timeout_check = gtk_check_button_new_with_mnemonic(_("Purge history after _timeout"));
+  g_signal_connect((GObject*)history_timeout_check, "toggled", (GCallback)check_toggled, NULL);
+  g_signal_connect((GObject*)history_timeout_check, "toggled", (GCallback)handle_history_purge_toggle, NULL);
+  gtk_box_pack_start((GtkBox*)vbox, history_timeout_check, FALSE, FALSE, 0);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
+  label = gtk_label_new(_("Timeout seconds"));
+  gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
+  gtk_box_pack_start((GtkBox*)hbox, label, FALSE, FALSE, 0);
+  adjustment_small = gtk_adjustment_new(0, 1, 100, 1, 10, 0);
+  history_timeout_spin = gtk_spin_button_new((GtkAdjustment*)adjustment_small, 0.0, 0);
+  g_signal_connect((GObject*)history_timeout_spin, "value-changed", (GCallback)handle_history_spinner, NULL);
+  gtk_spin_button_set_update_policy((GtkSpinButton*)history_timeout_spin, GTK_UPDATE_IF_VALID);
+  gtk_box_pack_start((GtkBox*)hbox, history_timeout_spin, FALSE, FALSE, 0);
+
+
 
   /* Build the items frame */
   frame = gtk_frame_new(NULL);
@@ -779,13 +877,13 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
   linemode_check = gtk_check_button_new_with_mnemonic(_("Show in a single _line"));
   gtk_box_pack_start((GtkBox*)vbox, linemode_check, FALSE, FALSE, 0);
   reverse_check = gtk_check_button_new_with_mnemonic(_("Show in _reverse order"));
   gtk_box_pack_start((GtkBox*)vbox, reverse_check, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Character length of items:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -794,7 +892,7 @@ void show_preferences(gint tab) {
   charlength_spin = gtk_spin_button_new((GtkAdjustment*)adjustment, 0.0, 0);
   gtk_spin_button_set_update_policy((GtkSpinButton*)charlength_spin, GTK_UPDATE_IF_VALID);
   gtk_box_pack_start((GtkBox*)hbox, charlength_spin, FALSE, FALSE, 0);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Omit items in the:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -815,9 +913,9 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
-  hbox = gtk_hbox_new(FALSE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Omit items in the:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -833,7 +931,7 @@ void show_preferences(gint tab) {
   GtkWidget* page_actions = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)page_actions, 6, 6, 6, 6);
   gtk_notebook_append_page((GtkNotebook*)notebook, page_actions, gtk_label_new(_("Actions")));
-  GtkWidget* vbox_actions = gtk_vbox_new(FALSE, 6);
+  GtkWidget* vbox_actions = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
   gtk_container_add((GtkContainer*)page_actions, vbox_actions);
 
   /* Build the actions label */
@@ -901,7 +999,7 @@ void show_preferences(gint tab) {
   GtkWidget* page_exclude = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)page_exclude, 6, 6, 6, 6);
   gtk_notebook_append_page((GtkNotebook*)notebook, page_exclude, gtk_label_new(_("Exclude")));
-  GtkWidget* vbox_exclude = gtk_vbox_new(FALSE, 6);
+  GtkWidget* vbox_exclude = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
   gtk_container_add((GtkContainer*)page_exclude, vbox_exclude);
 
   /* Build the exclude label */
@@ -950,11 +1048,24 @@ void show_preferences(gint tab) {
   gtk_box_pack_start((GtkBox*)hbbox_exclude, remove_button_exclude, FALSE, TRUE, 0);
   gtk_box_pack_start((GtkBox*)vbox_exclude, hbbox_exclude, FALSE, FALSE, 0);
 
+  /* Build the exclude windows section */
+  label = gtk_label_new(_("Exclude clipboard content from windows:"));
+  gtk_label_set_line_wrap((GtkLabel*)label, TRUE);
+  gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.0);
+  gtk_box_pack_start((GtkBox*)vbox_exclude, label, FALSE, FALSE, 0);
+
+  exclude_windows_entry = gtk_entry_new();
+  gtk_box_pack_start((GtkBox*)vbox_exclude, exclude_windows_entry, FALSE, FALSE, 0);
+  gtk_widget_set_tooltip_text(exclude_windows_entry, _("Regular expression to match against window name. For example\n"
+                                                     "^(keepass)|(lastpass)\nWill cause all windows starting with "
+                                                     "either 'keepass' or 'lastpass' to be ignored.\n"
+                                                     "The match is case insensitive."));
+
   /* Build the hotkeys page */
   GtkWidget* page_extras = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)page_extras, 12, 6, 12, 6);
   gtk_notebook_append_page((GtkNotebook*)notebook, page_extras, gtk_label_new(_("Hotkeys")));
-  GtkWidget* vbox_extras = gtk_vbox_new(FALSE, 12);
+  GtkWidget* vbox_extras = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
   gtk_container_add((GtkContainer*)page_extras, vbox_extras);
 
   /* Build the hotkeys frame */
@@ -966,10 +1077,10 @@ void show_preferences(gint tab) {
   alignment = gtk_alignment_new(0.50, 0.50, 1.0, 1.0);
   gtk_alignment_set_padding((GtkAlignment*)alignment, 12, 0, 12, 0);
   gtk_container_add((GtkContainer*)frame, alignment);
-  vbox = gtk_vbox_new(FALSE, 2);
+  vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_container_add((GtkContainer*)alignment, vbox);
   /* History key combination */
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("History hotkey:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -978,7 +1089,7 @@ void show_preferences(gint tab) {
   gtk_entry_set_width_chars((GtkEntry*)history_key_entry, 10);
   gtk_box_pack_end((GtkBox*)hbox, history_key_entry, TRUE, TRUE, 0);
   /* Actions key combination */
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Actions hotkey:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -987,7 +1098,7 @@ void show_preferences(gint tab) {
   gtk_entry_set_width_chars((GtkEntry*)actions_key_entry, 10);
   gtk_box_pack_end((GtkBox*)hbox, actions_key_entry, TRUE, TRUE, 0);
   /* Menu key combination */
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Menu hotkey:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -996,7 +1107,7 @@ void show_preferences(gint tab) {
   gtk_entry_set_width_chars((GtkEntry*)menu_key_entry, 10);
   gtk_box_pack_end((GtkBox*)hbox, menu_key_entry, TRUE, TRUE, 0);
   /* Search key combination */
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Manage hotkey:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -1005,7 +1116,7 @@ void show_preferences(gint tab) {
   gtk_entry_set_width_chars((GtkEntry*)search_key_entry, 10);
   gtk_box_pack_end((GtkBox*)hbox, search_key_entry, TRUE, TRUE, 0);
   /* Offline mode key combination */
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox, hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Offline mode hotkey:"));
   gtk_misc_set_alignment((GtkMisc*)label, 0.0, 0.50);
@@ -1024,7 +1135,9 @@ void show_preferences(gint tab) {
   gtk_toggle_button_set_active((GtkToggleButton*)save_uris_check, prefs.save_uris);
   gtk_toggle_button_set_active((GtkToggleButton*)use_rmb_menu_check, prefs.use_rmb_menu);
   gtk_toggle_button_set_active((GtkToggleButton*)save_check, prefs.save_history);
+  gtk_toggle_button_set_active((GtkToggleButton*)history_timeout_check, prefs.history_timeout);
   gtk_spin_button_set_value((GtkSpinButton*)history_spin, (gdouble)prefs.history_limit);
+  gtk_spin_button_set_value((GtkSpinButton*)history_timeout_spin, (gdouble)prefs.history_timeout_seconds);
   gtk_spin_button_set_value((GtkSpinButton*)items_menu, (gdouble)prefs.items_menu);
   gtk_toggle_button_set_active((GtkToggleButton*)statics_show_check, prefs.statics_show);
   gtk_spin_button_set_value((GtkSpinButton*)statics_items_spin, (gdouble)prefs.statics_items);
@@ -1039,6 +1152,7 @@ void show_preferences(gint tab) {
   gtk_entry_set_text((GtkEntry*)menu_key_entry, prefs.menu_key);
   gtk_entry_set_text((GtkEntry*)search_key_entry, prefs.search_key);
   gtk_entry_set_text((GtkEntry*)offline_key_entry, prefs.offline_key);
+  gtk_entry_set_text((GtkEntry*)exclude_windows_entry, prefs.exclude_windows);
 
   /* Read actions */
   read_actions();

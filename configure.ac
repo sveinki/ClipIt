@@ -2,7 +2,7 @@
 # Autoconf/automake.
 # -------------------------------------------------------------------------------
 AC_PREREQ([2.5])
-AC_INIT([clipit], [1.4.3], [oss@rspwn.com])
+AC_INIT([clipit], [1.4.5], [oss@rspwn.com])
 AM_INIT_AUTOMAKE
 
 AC_CONFIG_MACRO_DIR([m4])
@@ -28,7 +28,7 @@ GETTEXT_PACKAGE=clipit
 AC_SUBST(GETTEXT_PACKAGE)
 AC_DEFINE_UNQUOTED(GETTEXT_PACKAGE, "$GETTEXT_PACKAGE", [gettext package])
 
-ALL_LINGUAS="ca cs da de es es_ES et fr hu it ja nb pl pl pt_BR ro ru sv tr zh_CN"
+ALL_LINGUAS="ca cs da de es es_ES et fr hr hu it ja nb pl pl pt_BR ro ru sv tr zh_CN"
 AM_GLIB_GNU_GETTEXT()
 AC_PROG_INTLTOOL([0.23])
 
@@ -37,36 +37,6 @@ AC_SUBST(clipitlocaledir)
 
 AM_GNU_GETTEXT([external])
 AM_GNU_GETTEXT_VERSION(0.19)
-
-# -------------------------------------------------------------------------------
-# Application indicator.
-# -------------------------------------------------------------------------------
-
-APPINDICATOR_REQUIRED_VERSION=0.2.4
-
-AC_ARG_ENABLE([appindicator],
-	AS_HELP_STRING([--enable-appindicator[=@<:@no/auto/yes@:>@]],[Build support for application indicators]),
-	[enable_appindicator=$enableval],
-	[enable_appindicator="auto"])
-
-
-if test x$enable_appindicator = xauto ; then
-	PKG_CHECK_EXISTS(appindicator-0.1 >= $APPINDICATOR_REQUIRED_VERSION,
-		[enable_appindicator="yes"],
-		[enable_appindicator="no"])
-fi
-
-if test x$enable_appindicator = xyes ; then
-	PKG_CHECK_MODULES(APPINDICATOR,
-		[appindicator-0.1 >= $APPINDICATOR_REQUIRED_VERSION],
-		[AC_DEFINE(HAVE_APPINDICATOR, 1, [Have AppIndicator])])
-fi
-
-AM_CONDITIONAL(HAVE_APPINDICATOR, test x$enable_appindicator = xyes)
-AC_SUBST(APPINDICATOR_CFLAGS)
-AC_SUBST(APPINDICATOR_LIBS)
-
-AC_SUBST(X11_LIBS, -lX11)
 
 # -------------------------------------------------------------------------------
 # Config options.
@@ -93,9 +63,41 @@ AC_ARG_WITH([gtk3], AS_HELP_STRING([--with-gtk3], [Build with the GTK+ 3 interfa
 
 if test "x$with_gtk3" = "xyes"; then
   PKG_CHECK_MODULES([GTK], [gtk+-3.0])
+  APPINDICATOR_MODULE="ayatana-appindicator3-0.1"
 else
   PKG_CHECK_MODULES([GTK], [gtk+-2.0 >= 2.10])
+  APPINDICATOR_MODULE="ayatana-appindicator-0.1"
 fi
+
+# -------------------------------------------------------------------------------
+# Application indicator.
+# -------------------------------------------------------------------------------
+
+APPINDICATOR_REQUIRED_VERSION=0.2.4
+
+AC_ARG_ENABLE([appindicator],
+        AS_HELP_STRING([--enable-appindicator[=@<:@no/auto/yes@:>@]],[Build support for application indicators]),
+        [enable_appindicator=$enableval],
+        [enable_appindicator="auto"])
+
+if test x$enable_appindicator = xauto ; then
+        PKG_CHECK_EXISTS($APPINDICATOR_MODULE= >= $APPINDICATOR_REQUIRED_VERSION,
+                [enable_appindicator="yes"],
+                [enable_appindicator="no"])
+fi
+
+if test x$enable_appindicator = xyes ; then
+        PKG_CHECK_MODULES(APPINDICATOR,
+                [$APPINDICATOR_MODULE >= $APPINDICATOR_REQUIRED_VERSION],
+                [AC_DEFINE(HAVE_APPINDICATOR, 1, [Have AppIndicator])])
+fi
+
+AM_CONDITIONAL(HAVE_APPINDICATOR, test x$enable_appindicator = xyes)
+AC_SUBST(APPINDICATOR_CFLAGS)
+AC_SUBST(APPINDICATOR_LIBS)
+
+AC_SUBST(X11_LIBS, -lX11)
+
 
 AM_PATH_GLIB_2_0(2.14.0, [], AC_MSG_ERROR(Requirement not met: glib >= 2.14.0))
 
@@ -114,9 +116,9 @@ AC_C_CONST()
 # -------------------------------------------------------------------------------
 AC_TYPE_SIGNAL()
 
-AC_CONFIG_FILES([Makefile m4/Makefile
-			doc/Makefile
-			src/Makefile
-			data/Makefile])
+AC_CONFIG_FILES([Makefile
+		doc/Makefile
+		src/Makefile
+		data/Makefile])
 
 AC_OUTPUT([po/Makefile.in])

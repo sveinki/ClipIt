@@ -141,7 +141,7 @@ static void edit_selected()
                                                     GTK_STOCK_OK,           GTK_RESPONSE_ACCEPT, NULL);
 
     gtk_window_set_default_size((GtkWindow*)dialog, 450, 300);
-    gtk_window_set_icon((GtkWindow*)dialog, gtk_widget_render_icon(dialog, GTK_STOCK_EDIT, GTK_ICON_SIZE_MENU, NULL));
+    gtk_window_set_icon((GtkWindow*)dialog, gtk_widget_render_icon_pixbuf(dialog, GTK_STOCK_EDIT, GTK_ICON_SIZE_MENU));
 
     /* Build the scrolled window with the text view */
     GtkWidget* scrolled_window = gtk_scrolled_window_new((GtkAdjustment*) gtk_adjustment_new(0, 0, 0, 0, 0, 0),
@@ -349,7 +349,7 @@ gboolean show_search()
   /* Create the dialog */
   GtkWidget* search_dialog = gtk_dialog_new();
 
-  gtk_window_set_icon((GtkWindow*)search_dialog, gtk_widget_render_icon(search_dialog, GTK_STOCK_FIND, GTK_ICON_SIZE_MENU, NULL));
+  gtk_window_set_icon((GtkWindow*)search_dialog, gtk_widget_render_icon_pixbuf(search_dialog, GTK_STOCK_FIND, GTK_ICON_SIZE_MENU));
   gchar *orig_title = _("Manage History");
   gchar *title = 0;
   if (prefs.offline_mode)
@@ -367,11 +367,11 @@ gboolean show_search()
   if (win_height > screen_height)
     win_height = screen_height;
 
-  GtkWidget* vbox_search = gtk_vbox_new(FALSE, 10);
+  GtkWidget* vbox_search = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
   gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area (GTK_DIALOG(search_dialog))), vbox_search, TRUE, TRUE, 2);
   gtk_widget_set_size_request((GtkWidget*)vbox_search, 400, win_height);
 
-  hbox = gtk_hbox_new(TRUE, 4);
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_box_pack_start((GtkBox*)vbox_search, hbox, FALSE, FALSE, 0);
   search_entry = gtk_entry_new();
   gtk_box_pack_end((GtkBox*)hbox, search_entry, TRUE, TRUE, 0);

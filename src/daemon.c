@@ -24,7 +24,6 @@
 #include "daemon.h"
 
 
-static gint timeout_id;
 static gchar *primary_text;
 static gchar *clipboard_text;
 static GtkClipboard *primary;
@@ -53,7 +52,17 @@ static void daemon_check()
 	{
 		/* Get the button state to check if the mouse button is being held */
 		GdkModifierType button_state;
-		gdk_window_get_pointer(NULL, NULL, NULL, &button_state);
+		GdkScreen *screen = gdk_screen_get_default();
+		if (screen)
+		{
+			GdkDisplay *display = gdk_screen_get_display(screen);
+			GdkWindow *window = gdk_screen_get_root_window(screen);
+			GdkSeat *seat = gdk_display_get_default_seat(display);
+
+			gdk_window_get_device_position(window, gdk_seat_get_pointer(seat), NULL,
+				NULL, &button_state);
+		}
+
 		if ((primary_temp != NULL) && !(button_state & GDK_BUTTON1_MASK))
 		{
 			g_free(primary_text);
@@ -82,19 +91,6 @@ static void daemon_check()
 	g_free(clipboard_temp);
 }
 
-/* Called if timeout was destroyed */
-static void reset_daemon(gpointer data)
-{
-	if (timeout_id != 0)
-		g_source_remove(timeout_id);
-	/* Add the daemon loop */
-	timeout_id = g_timeout_add_full(G_PRIORITY_LOW,
-					DAEMON_INTERVAL,
-					(GSourceFunc)daemon_check,
-					NULL,
-					(GDestroyNotify)reset_daemon);
-}
-
 /* Initializes daemon mode */
 void init_daemon_mode()
 {
@@ -102,11 +98,9 @@ void init_daemon_mode()
 	primary = gtk_clipboard_get(GDK_SELECTION_PRIMARY);
 	clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
 	/* Add the daemon loop */
-	timeout_id = g_timeout_add_full(G_PRIORITY_LOW,
-					DAEMON_INTERVAL,
-					(GSourceFunc)daemon_check,
-					NULL,
-					(GDestroyNotify)reset_daemon);
+	/* Register for clipboard change events */
+	g_signal_connect(primary, "owner-change", G_CALLBACK(daemon_check), NULL);
+	g_signal_connect(clipboard, "owner-change", G_CALLBACK(daemon_check), NULL);
 
 	/* Start daemon loop */
 	gtk_main();
